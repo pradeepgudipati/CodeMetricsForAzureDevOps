@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+    <script src="lib/VSS.SDK.min.js"></script>
+    <style>
+        body {
+            background-color: rgb(0, 67, 117);
+            color: white;
+            margin: 10px;
+            font-family: "Segoe UI VSS (Regular)", "-apple-system", BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+    </style>
+    <script type="text/javascript">
+        VSS.init();
+        VSS.ready(function() {
+            document.getElementById("name").innerText = VSS.getWebContext().user.name;
+        });
+
+        VSS.require(["VSS/Authentication/Services", "VSS/Service", "TFS/WorkItemTracking/RestClient",
+            "TFS/VersionControl/GitRestClient", "VSS/Controls", "VSS/Controls/Grids",
+            "TFS/VersionControl/Contracts"
+        ], function(VSS_Auth_Service, VSS_Service, TFS_Wit_WebApi, RestClient, Controls, Grids, Contracts) {
+            // Unhide once data is visible 
+            document.getElementById("PR-Stats").style.visibility = 'hidden';
+            // Get the REST client
+            var witClient = VSS_Service.getCollectionClient(TFS_Wit_WebApi.WorkItemTrackingHttpClient);
+            //Code for getting the access token
+            VSS.getAccessToken().then(function(token) {
+                // Format the auth header
+                var authHeader = VSS_Auth_Service.authTokenManager.getAuthorizationHeader(token);
+            });
+            //Get the Core Rest Client 
+            var coreClient = RestClient.getClient();
+            // Get the Project Name 
+            var projectName = __vssPageContext.webContext.project.name;
+            // Get the Repo details
+            var repoIndexLength = __vssPageContext.hubsContext.hubs[0].uri.split("/").length;
+            // Get the Repo name 
+            var repositoryName = __vssPageContext.hubsContext.hubs[0].uri.split("/")[repoIndexLength - 1];
+
+
+            // Commits Data Source 
+            var commitsDataSource = [];
+            // Code Analytics Data Source 
+            var codeAnalytics = {};
+
+
+            // Get All Commits, Use a big number in $top as default only fetches 100.
+            coreClient.getCommits(repositoryName, "", projectName, 0, 999999999).then(function(result) {
+                for (var index = 0; index < result.length; index++) {
+                    var i = index.toString();
+                    var record = result[i];
+                    // Get the Email id of the author
+                    var emailOfAuthor = record.author.email;
+                    var nameOfAuthor = record.author.name;
+                    var keyField = emailOfAuthor != null ? emailOfAuthor : nameOfAuthor;
+                    // Get the Adds, edits, deletes per commit
+
+                    var codeAdds = record.changeCounts.Add;
+                    var codeEdits = record.changeCounts.Edit;
+                    var codeDeletes = record.changeCounts.Delete;
+                    // Count the Commits
+                    if (commitsDataSource.filter(t => t.key == keyField).length == 0) {
+                        commitsDataSource.push({
+                            key: keyField,
+                            value: "1"
+                        });
+                    } else {
+                        var existingCount = commitsDataSource.filter(t => t.key == keyField)[0].value;
+                        //increment if the author is the same
+                        commitsDataSource.filter(t => t.key == keyField)[0].value = parseInt(
+                            existingCount) + 1;
+                    }
+                    // Add up the Commit insights
+
+
+
+                    if (codeAnalytics[keyField] == undefined) {
+                        codeAnalytics[keyField] = {
+                            name: keyField,
+                            adds: codeAdds,
+                            edits: codeEdits,
+                            deletes: codeDeletes
+                        }
+                    } else {
+                        var existingRecord = codeAnalytics[keyField];
+                        existingRecord.adds += codeAdds;
+                        existingRecord.edits += codeEdits;
+                        existingRecord.deletes += codeDeletes;
+                        codeAnalytics[keyField] = existingRecord;
+                    }
+                }
+                var fullAnalytics = Object.values(codeAnalytics);
+                //Gets all repositories for this project
+                document.getElementById("PR-Stats").style.visibility = 'visible';
+                // Initialize the grid control with two columns, "key" and "value"
+                Controls.create(Grids.Grid, $("#grid-commits-total"), {
+                    height: "300px", // Explicit height is required for a Grid control, % does not work
+                    width: "350px", // Explicit width is required for a Grid control, % does not work
+                    columns: [
+                        // text is the column header text. 
+                        // index is the key into the source object to find the data for this column
+                        // width is the width of the column, in pixels
+                        {
+                            text: "Name",
+                            index: "key",
+                            width: 200
+                        }, {
+                            text: "Total Commits",
+                            index: "value",
+                            width: 100
+                        }
+                    ],
+                    // This data source is rendered into the Grid columns defined above
+                    source: commitsDataSource
+                });
+                Controls.create(Grids.Grid, $("#grid-commits-insights"), {
+                    height: "300px", // Explicit height is required for a Grid control
+                    columns: [
+                        // text is the column header text. 
+                        // index is the key into the source object to find the data for this column
+                        // width is the width of the column, in pixels
+                        {
+                            text: "Name",
+                            index: "name",
+                            width: 300
+                        }, {
+                            text: "Total Adds",
+                            index: "adds",
+                            width: 75
+                        }, {
+                            text: "Total Edits",
+                            index: "edits",
+                            width: 75
+                        }, {
+                            text: "Total Deletes",
+                            index: "deletes",
+                            width: 85
+                        }
+                    ],
+                    // This data source is rendered into the Grid columns defined above
+                    source: fullAnalytics
+                });
+            });
+
+            // Get all Repositories for the project 
+            coreClient.getRepositories(projectName, false).then(function(repos) {
+                // Array of all Repositories in the project
+                var repoIds = [];
+                // Make it visible once data is collected
+                for (var i = 0; i < repos.length; i++) {
+                    var ix = i.toString();
+                    var record = repos[ix];
+                    repoIds.push(record.id);
+                }
+                // PR Analytics object
+                var PRsCount = []
+                var AveragePRAge = 0;
+                var AverageComments = 0;
+                var AverageIterations = 0;
+                var TotalPRCount = 0;
+                // Get all repos and find the total of all PRs
+                for (var im = 0; im < repoIds.length; im++) {
+                    var ih = im.toString();
+                    var repo = repoIds[ih];
+                    debugger;
+                    // Get All PR's for this repo
+                    coreClient.getPullRequests(repo, {
+                        "status": "All"
+                    }, projectName, 99999, 0, 999999).then(function(pullRequests) {
+                        TotalPRCount += pullRequests.length;
+                        // console.log(results);
+                        var totalPRTime = 0;
+                        var totalPRComments = 0;
+                        var totalPRIterations = 0;
+                        for (var index = 0; index < pullRequests.length; index++) {
+                            var i = index.toString();
+                            var record = pullRequests[i];
+                            if (record.closedDate != null) {
+                                var age_in_ms = record.closedDate.getTime() - record.creationDate
+                                    .getTime();
+                                var age_in_s = age_in_ms / 1000;
+                                var age_in_min = age_in_s / 60;
+                                totalPRTime += age_in_min;
+                                var nameOfAuthor = record.createdBy.uniqueName
+                                    // Count the Commits
+                                if (PRsCount.filter(t => t.key == nameOfAuthor).length == 0) {
+                                    PRsCount.push({
+                                        key: nameOfAuthor,
+                                        value: "1"
+                                    });
+                                } else {
+                                    var existingCount = PRsCount.filter(t => t.key ==
+                                        nameOfAuthor)[0].value;
+                                    //increment if the author is the same
+                                    PRsCount.filter(t => t.key == nameOfAuthor)[0].value =
+                                        parseInt(existingCount) + 1;
+                                }
+                            }
+
+
+                        }
+                        AveragePRAge = Math.abs(Math.round(totalPRTime / pullRequests.length));
+                        // Initialize the grid control with two columns, "key" and "value"
+                        Controls.create(Grids.Grid, $("#grid-prs-total"), {
+                            height: "300px", // Explicit height is required for a Grid control, % does not work
+                            columns: [
+                                // text is the column header text.
+                                // index is the key into the source object to find the data for this column
+                                // width is the width of the column, in pixels
+                                {
+                                    text: "Name",
+                                    index: "key",
+                                    width: 100
+                                }, {
+                                    text: "Total PRs",
+                                    index: "value",
+                                    width: 100
+                                }
+                            ],
+                            // This data source is rendered into the Grid columns defined above
+                            source: PRsCount
+                        });
+                        document.getElementById("pr_age").innerText = "Total PRs' = " +
+                            TotalPRCount + "\n Average Age in minutes = " + AveragePRAge;
+                    });
+
+                }
+            });
+            VSS.notifyLoadSucceeded();
+        });
+    </script>
+    <!-- <script type="text/javascript" src="js/CodeAnalytics.js"></script> -->
+</head>
+
+<body>
+    <div>
+        <h1> Hello,
+            <span id="name">
+                </span>
+        </h1>
+        <div id="Commit-Stats" style="width: 100%; overflow: auto;">
+            <div style="width: 350px; float: left;">
+                <div>
+                    <h3> Total Commits per user
+                    </h3>
+                </div>
+                <div id="grid-commits-total">
+                </div>
+            </div>
+            <div style="margin-left: 400px; width: 640px;">
+                <div>
+                    <h3> Git stats per user
+                    </h3>
+                </div>
+                <div id="grid-commits-insights">
+                </div>
+            </div>
+        </div>
+        <br>
+        <br>
+        <div id="PR-Stats" style="width: 100%; overflow: auto;">
+            <div style="width: 350px; float: left;">
+                <div>
+                    <h3> Total PRs per user
+                    </h3>
+                </div>
+                <div id="grid-prs-total">
+                </div>
+            </div>
+            <div style="margin-left: 810px; width: 350px;">
+                <div>
+                    <h3> Average PR Age in minutes
+                    </h3>
+                </div>
+                <h4>
+                    <div id="pr_age">
+                    </div>
+                </h4>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
